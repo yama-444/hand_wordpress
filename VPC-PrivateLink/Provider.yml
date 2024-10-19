@@ -1,0 +1,179 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: "Provider Template."
+
+Parameters:
+  # ------------------------------------------------------------#
+  # Common
+  # ------------------------------------------------------------#
+  Prefix:
+    Type: String
+    Default: "prefix"
+
+  # ------------------------------------------------------------#
+  # Network
+  # ------------------------------------------------------------#
+  VpcCidr:
+    Type: String
+    Default: "10.1.0.0/16"
+
+  PrivateSubnetCidr:
+    Type: String
+    Default: "10.1.0.0/24"
+
+  # ------------------------------------------------------------#
+  # EC2
+  # ------------------------------------------------------------#
+  EC2InstanceName:
+    Type: String
+    Default: "ec2"
+  EC2InstanceAMI:
+    Type: AWS::EC2::Image::Id
+    Default: "ami-078296f82eb463377" # Amazon Linux 2 AMI (HVM) - Kernel 5.10, SSD Volume Type
+  EC2InstanceInstanceType:
+    Type: String
+    Default: "t3.nano"
+  EC2InstanceVolumeType:
+    Type: String
+    Default: "gp2"
+  EC2InstanceVolumeSize:
+    Type: String
+    Default: "8"
+
+Resources:
+  # ------------------------------------------------------------#
+  #  Network
+  # ------------------------------------------------------------#
+  Vpc:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: !Ref VpcCidr
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      Tags:
+        - Key: Name
+          Value: !Sub ${Prefix}-vpc
+
+  PrivateSubnet:
+    Type: AWS::EC2::Subnet
+    Properties:
+      CidrBlock: !Ref PrivateSubnetCidr
+      VpcId: !Ref Vpc
+      AvailabilityZone:
+        Fn::Select:
+          - "0"
+          - Fn::GetAZs: ""
+      Tags:
+        - Key: Name
+          Value: !Sub ${Prefix}-private-subnet
+
+  PrivateRouteTable: 
+    Type: AWS::EC2::RouteTable
+    Properties: 
+      VpcId: !Ref Vpc 
+      Tags: 
+        - Key: Name
+          Value: !Sub "${Prefix}-table"
+  
+  PrivateSubnetTableAssociation: 
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties: 
+      SubnetId: !Ref PrivateSubnet
+      RouteTableId: !Ref PrivateRouteTable
+
+  SecurityGroup:
+    Type: "AWS::EC2::SecurityGroup"
+    Properties:
+      VpcId: !Ref Vpc
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: "0.0.0.0/0"
+      GroupName: !Sub "${Prefix}-sg"
+      GroupDescription: "-"
+      Tags:
+        - Key: "Name"
+          Value: !Sub "${Prefix}-sg"
+
+  # ------------------------------------------------------------#
+  #  VPC Endpoint
+  # ------------------------------------------------------------#
+  VPCS3Endpoint:
+    Type: "AWS::EC2::VPCEndpoint"
+    Properties:
+      RouteTableIds: 
+        - !Ref PrivateRouteTable
+      ServiceName: !Sub "com.amazonaws.${AWS::Region}.s3"
+      VpcEndpointType: Gateway
+      VpcId: !Ref Vpc 
+
+  # ------------------------------------------------------------#
+  #  EC2Instance
+  # ------------------------------------------------------------#
+  EC2Instance:
+    Type: "AWS::EC2::Instance"
+    Properties:
+      Tags:
+        - Key: Name
+          Value: !Sub "${Prefix}-${EC2InstanceName}"
+      ImageId: !Ref EC2InstanceAMI
+      InstanceType: !Ref EC2InstanceInstanceType
+      DisableApiTermination: false
+      EbsOptimized: false
+      BlockDeviceMappings:
+        - DeviceName: /dev/xvda
+          Ebs:
+            DeleteOnTermination: true
+            VolumeType: !Ref EC2InstanceVolumeType
+            VolumeSize: !Ref EC2InstanceVolumeSize
+      SecurityGroupIds:
+        - !Ref SecurityGroup
+      SubnetId: !Ref PrivateSubnet
+      UserData: !Base64 |
+        #! /bin/bash
+        sudo yum update -y
+        sudo yum -y install httpd
+        sudo systemctl start httpd
+        sudo systemctl enable httpd
+
+  # ------------------------------------------------------------#
+  #  NLB
+  # ------------------------------------------------------------#  
+  TargetGroup: 
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties: 
+      VpcId: !Ref Vpc
+      Name: !Sub "${Prefix}-tg"
+      Protocol: TCP
+      Port: 80
+      Tags: 
+        - Key: Name
+          Value: !Sub "${Prefix}-tg"
+      Targets: 
+        - Id: !Ref EC2Instance
+          Port: 80
+   
+  NLB: 
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties: 
+      Name: !Sub "${Prefix}-nlb"
+      Tags: 
+        - Key: Name
+          Value: !Sub "${Prefix}-nlb"
+      Scheme: "internal"
+      LoadBalancerAttributes: 
+        - Key: "deletion_protection.enabled"
+          Value: false
+      Subnets: 
+        - !Ref PrivateSubnet
+      Type: network
+
+  NLBListener: 
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties: 
+      DefaultActions: 
+        - TargetGroupArn: !Ref TargetGroup
+          Type: forward
+      LoadBalancerArn: !Ref NLB
+      Port: 80
+      Protocol: TCP

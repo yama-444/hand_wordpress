@@ -1,0 +1,200 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: "Consumer Template."
+
+Parameters:
+  # ------------------------------------------------------------#
+  # Common
+  # ------------------------------------------------------------#
+  Prefix:
+    Type: String
+    Default: "prefix"
+
+  # ------------------------------------------------------------#
+  # Network
+  # ------------------------------------------------------------#
+  VpcCidr:
+    Type: String
+    Default: "10.0.0.0/16"
+
+  PrivateSubnetCidr:
+    Type: String
+    Default: "10.0.0.0/24"
+
+  # ------------------------------------------------------------#
+  # EC2
+  # ------------------------------------------------------------#
+  EC2InstanceName:
+    Type: String
+    Default: "ec2"
+  EC2InstanceAMI:
+    Type: AWS::EC2::Image::Id
+    Default: "ami-078296f82eb463377" # Amazon Linux 2 AMI (HVM) - Kernel 5.10, SSD Volume Type
+  EC2InstanceInstanceType:
+    Type: String
+    Default: "t3.nano"
+  EC2InstanceVolumeType:
+    Type: String
+    Default: "gp2"
+  EC2InstanceVolumeSize:
+    Type: String
+    Default: "8"
+
+Resources:
+  # ------------------------------------------------------------#
+  #  Network
+  # ------------------------------------------------------------#
+  Vpc:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: !Ref VpcCidr
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      Tags:
+        - Key: Name
+          Value: !Sub ${Prefix}-vpc
+
+  PrivateSubnet:
+    Type: AWS::EC2::Subnet
+    Properties:
+      CidrBlock: !Ref PrivateSubnetCidr
+      VpcId: !Ref Vpc
+      AvailabilityZone:
+        Fn::Select:
+          - "0"
+          - Fn::GetAZs: ""
+      Tags:
+        - Key: Name
+          Value: !Sub ${Prefix}-private-subnet
+
+  PrivateRouteTable: 
+    Type: AWS::EC2::RouteTable
+    Properties: 
+      VpcId: !Ref Vpc 
+      Tags: 
+        - Key: Name
+          Value: !Sub "${Prefix}-table"
+  
+  PrivateSubnetTableAssociation: 
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties: 
+      SubnetId: !Ref PrivateSubnet
+      RouteTableId: !Ref PrivateRouteTable
+  
+  SecurityGroup:
+    Type: "AWS::EC2::SecurityGroup"
+    Properties:
+      VpcId: !Ref Vpc
+      GroupName: !Sub "${Prefix}-sg"
+      GroupDescription: "-"
+      Tags:
+        - Key: "Name"
+          Value: !Sub "${Prefix}-sg"
+
+  # ------------------------------------------------------------#
+  #  VPC Endpoint
+  # ------------------------------------------------------------#
+  SsmVpcEndpointSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: !Sub ${Prefix}-ssm-vpc-endpoint-sg
+      GroupName: !Sub ${Prefix}-ssm-vpc-endpoint-sg
+      VpcId: !Ref Vpc
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          SourceSecurityGroupId: !Ref SecurityGroup
+      Tags:
+        - Key: Name
+          Value: !Sub ${Prefix}-ssm-vpc-endpoint-sg
+
+  SsmVpcEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcEndpointType: Interface
+      PrivateDnsEnabled: true
+      ServiceName: !Sub com.amazonaws.${AWS::Region}.ssm
+      VpcId: !Ref Vpc
+      SubnetIds:
+        - !Ref PrivateSubnet
+      SecurityGroupIds:
+        - !Ref SsmVpcEndpointSecurityGroup
+
+  SsmMessagesVpcEndpointSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: !Sub ${Prefix}-ssmmessages-vpc-endpoint-sg
+      GroupName: !Sub ${Prefix}-ssmmessages-vpc-endpoint-sg
+      VpcId: !Ref Vpc
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          SourceSecurityGroupId: !Ref SecurityGroup
+      Tags:
+        - Key: Name
+          Value: !Sub ${Prefix}-ssmmessages-vpc-endpoint-sg
+
+  SsmMessagesVpcEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcEndpointType: Interface
+      PrivateDnsEnabled: true
+      ServiceName: !Sub com.amazonaws.${AWS::Region}.ssmmessages
+      VpcId: !Ref Vpc
+      SubnetIds:
+        - !Ref PrivateSubnet
+      SecurityGroupIds:
+        - !Ref SsmMessagesVpcEndpointSecurityGroup
+
+  # ------------------------------------------------------------#
+  #  Ec2InstanceProfile
+  # ------------------------------------------------------------#
+  Ec2Role:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub ${Prefix}-ec2-role
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - ec2.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+
+  Ec2InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      InstanceProfileName: !Sub ${Prefix}-ec2-instance-profile
+      Roles:
+        - !Ref Ec2Role
+
+  # ------------------------------------------------------------#
+  #  EC2Instance
+  # ------------------------------------------------------------#
+  EC2Instance:
+    Type: "AWS::EC2::Instance"
+    Properties:
+      Tags:
+        - Key: Name
+          Value: !Sub "${Prefix}-${EC2InstanceName}"
+      ImageId: !Ref EC2InstanceAMI
+      InstanceType: !Ref EC2InstanceInstanceType
+      IamInstanceProfile: !Ref Ec2InstanceProfile
+      DisableApiTermination: false
+      EbsOptimized: false
+      BlockDeviceMappings:
+        - DeviceName: /dev/xvda
+          Ebs:
+            DeleteOnTermination: true
+            VolumeType: !Ref EC2InstanceVolumeType
+            VolumeSize: !Ref EC2InstanceVolumeSize
+      SecurityGroupIds:
+        - !Ref SecurityGroup
+      SubnetId: !Ref PrivateSubnet
+      UserData: !Base64 |
+        #! /bin/bash
+        yum update -y
